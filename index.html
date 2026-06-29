@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 
 const GOAL = 1_000_000_000;
 
@@ -24,7 +24,10 @@ function AnimatedNumber({ value, duration = 800 }) {
     const start = prev.current;
     const end = value;
     const diff = end - start;
-    if (diff === 0) return;
+    if (diff === 0) {
+      setDisplay(end);
+      return;
+    }
     const startTime = performance.now();
     const tick = (now) => {
       const t = Math.min((now - startTime) / duration, 1);
@@ -44,8 +47,17 @@ export default function App() {
   const [entries, setEntries] = useState(() => {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; }
   });
+
+  const getTodayDate = () => new Date().toISOString().split("T")[0];
+
   const [tab, setTab] = useState("overview");
-  const [form, setForm] = useState({ type: "income", amount: "", category: CATEGORIES_INCOME[0], note: "", date: new Date().toISOString().split("T")[0] });
+  const [form, setForm] = useState({ 
+    type: "income", 
+    amount: "", 
+    category: CATEGORIES_INCOME[0], 
+    note: "", 
+    date: getTodayDate() 
+  });
   const [filterType, setFilterType] = useState("all");
   const [toast, setToast] = useState(null);
 
@@ -53,10 +65,18 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
   }, [entries]);
 
-  const totalIncome = entries.filter(e => e.type === "income").reduce((s, e) => s + e.amount, 0);
-  const totalExpense = entries.filter(e => e.type === "expense").reduce((s, e) => s + e.amount, 0);
-  const balance = totalIncome - totalExpense;
-  const progress = Math.min((balance / GOAL) * 100, 100);
+  // Оптимизация основных расчетов баланса
+  const { totalIncome, totalExpense, balance, progress } = useMemo(() => {
+    const income = entries.filter(e => e.type === "income").reduce((s, e) => s + e.amount, 0);
+    const expense = entries.filter(e => e.type === "expense").reduce((s, e) => s + e.amount, 0);
+    const bal = income - expense;
+    return {
+      totalIncome: income,
+      totalExpense: expense,
+      balance: bal,
+      progress: Math.min((bal / GOAL) * 100, 100)
+    };
+  }, [entries]);
 
   function showToast(msg, color = "#d4a843") {
     setToast({ msg, color });
@@ -68,7 +88,16 @@ export default function App() {
     if (!amount || amount <= 0) { showToast("Введи сумму!", "#e05555"); return; }
     const entry = { id: Date.now(), type: form.type, amount, category: form.category, note: form.note, date: form.date };
     setEntries(prev => [entry, ...prev]);
-    setForm(f => ({ ...f, amount: "", note: "" }));
+    
+    // Полный сброс формы, включая дату на текущую
+    setForm({
+      type: "income",
+      amount: "",
+      category: CATEGORIES_INCOME[0],
+      note: "",
+      date: getTodayDate()
+    });
+
     showToast(form.type === "income" ? `+${formatMoney(amount)} добавлено 🚀` : `-${formatMoney(amount)} записано`);
     setTab("overview");
   }
@@ -80,20 +109,38 @@ export default function App() {
 
   const filtered = entries.filter(e => filterType === "all" || e.type === filterType);
 
-  // Analytics
-  const byCat = entries.reduce((acc, e) => {
-    const key = e.category + (e.type === "income" ? "_in" : "_ex");
-    acc[key] = (acc[key] || { cat: e.category, type: e.type, total: 0 });
-    acc[key].total += e.amount;
-    return acc;
-  }, {});
-  const topIncome = Object.values(byCat).filter(x => x.type === "income").sort((a, b) => b.total - a.total).slice(0, 5);
-  const topExpense = Object.values(byCat).filter(x => x.type === "expense").sort((a, b) => b.total - a.total).slice(0, 5);
+  // Оптимизация аналитики и расчет реальных дней до цели
+  const { topIncome, topExpense, daysLeft } = useMemo(() => {
+    const byCat = entries.reduce((acc, e) => {
+      const key = e.category + (e.type === "income" ? "_in" : "_ex");
+      acc[key] = (acc[key] || { cat: e.category, type: e.type, total: 0 });
+      acc[key].total += e.amount;
+      return acc;
+    }, {});
 
-  const daysLeft = balance > 0 ? Math.ceil((GOAL - balance) / (balance / Math.max(entries.length, 1))) : "∞";
+    const topInc = Object.values(byCat).filter(x => x.type === "income").sort((a, b) => b.total - a.total).slice(0, 5);
+    const topExp = Object.values(byCat).filter(x => x.type === "expense").sort((a, b) => b.total - a.total).slice(0, 5);
+
+    // Расчет дней на основе динамики среднего заработка в день
+    let days = "∞";
+    if (balance > 0 && entries.length > 0) {
+      const dates = entries.map(e => new Date(e.date).getTime());
+      const minDate = Math.min(...dates);
+      const maxDate = new Date().getTime(); 
+      const diffTime = Math.max(maxDate - minDate, 24 * 60 * 60 * 1000); // минимум 1 день во избежание деления на 0
+      const diffDays = diffTime / (24 * 60 * 60 * 1000);
+      
+      const dailyProfit = balance / diffDays;
+      if (dailyProfit > 0) {
+        days = Math.ceil((GOAL - balance) / dailyProfit).toLocaleString();
+      }
+    }
+
+    return { topIncome: topInc, topExpense: topExp, daysLeft: days };
+  }, [entries, balance]);
 
   return (
-    <div style={{ minHeight: "100vh", background: "#0a0a0f", color: "#e8dfc8", fontFamily: "'Segoe UI', system-ui, sans-serif", display: "flex", flexDirection: "column", alignItems: "center" }}>
+    <div style={{ minHeight: "100vh", background: "#0a0a0f", color: "#e8dfc8", fontFamily: "'Segoe UI', system-ui, sans-serif", display: "flex", flexDirection: "column", alignItems: "center", overflowX: "hidden" }}>
       {/* Toast */}
       {toast && (
         <div style={{ position: "fixed", top: 24, left: "50%", transform: "translateX(-50%)", background: "#1a1a25", border: `1px solid ${toast.color}`, color: toast.color, padding: "10px 22px", borderRadius: 40, fontSize: 14, zIndex: 999, boxShadow: `0 0 20px ${toast.color}44`, transition: "all .3s" }}>
@@ -101,7 +148,7 @@ export default function App() {
         </div>
       )}
 
-      <div style={{ width: "100%", maxWidth: 520, padding: "0 0 100px" }}>
+      <div style={{ width: "100%", maxWidth: 520, padding: "0 0 100px", boxSizing: "border-box" }}>
         {/* Header */}
         <div style={{ padding: "32px 20px 0", textAlign: "center" }}>
           <div style={{ fontSize: 11, letterSpacing: 5, color: "#d4a843", textTransform: "uppercase", marginBottom: 6 }}>Дневник состояния</div>
@@ -148,18 +195,18 @@ export default function App() {
                     transition: "width 1s cubic-bezier(.4,0,.2,1)"
                   }} />
                 </div>
-                <div style={{ marginTop: 14, display: "flex", justifyContent: "space-between" }}>
-                  <div style={{ textAlign: "center" }}>
+                <div style={{ marginTop: 14, display: "flex", justifyContent: "space-between", gap: 8 }}>
+                  <div style={{ textAlign: "center", flex: 1 }}>
                     <div style={{ fontSize: 11, color: "#555" }}>Осталось накопить</div>
-                    <div style={{ fontSize: 15, fontWeight: 700, color: "#e8dfc8", marginTop: 2 }}>{formatMoney(Math.max(GOAL - balance, 0), true)}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#e8dfc8", marginTop: 2 }}>{formatMoney(Math.max(GOAL - balance, 0), true)}</div>
                   </div>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ fontSize: 11, color: "#555" }}>Транзакций</div>
-                    <div style={{ fontSize: 15, fontWeight: 700, color: "#e8dfc8", marginTop: 2 }}>{entries.length}</div>
+                  <div style={{ textAlign: "center", flex: 1 }}>
+                    <div style={{ fontSize: 11, color: "#555" }}>Дней до цели</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#d4a843", marginTop: 2 }}>{daysLeft}</div>
                   </div>
-                  <div style={{ textAlign: "center" }}>
+                  <div style={{ textAlign: "center", flex: 1 }}>
                     <div style={{ fontSize: 11, color: "#555" }}>Чистая прибыль</div>
-                    <div style={{ fontSize: 15, fontWeight: 700, color: balance >= 0 ? "#4caf6e" : "#e05555", marginTop: 2 }}>{formatMoney(balance, true)}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: balance >= 0 ? "#4caf6e" : "#e05555", marginTop: 2 }}>{formatMoney(balance, true)}</div>
                   </div>
                 </div>
               </div>
@@ -274,7 +321,7 @@ export default function App() {
       </div>
 
       {/* Bottom Nav */}
-      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#0d0d16", borderTop: "1px solid #1e1e2e", display: "flex", justifyContent: "center" }}>
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#0d0d16", borderTop: "1px solid #1e1e2e", display: "flex", justifyContent: "center", zIndex: 900 }}>
         <div style={{ display: "flex", maxWidth: 520, width: "100%" }}>
           {[["overview", "Обзор"], ["add", "Добавить"], ["history", "История"], ["analytics", "Аналитика"]].map(([t, l]) => (
             <button key={t} onClick={() => setTab(t)}
@@ -308,12 +355,13 @@ function EntryRow({ entry, onDelete }) {
       <div style={{ fontSize: 16, fontWeight: 700, color: entry.type === "income" ? "#4caf6e" : "#e05555", flexShrink: 0 }}>
         {entry.type === "income" ? "+" : "−"}{formatMoney(entry.amount, true)}
       </div>
-      <button onClick={() => onDelete(entry.id)} style={{ background: "none", border: "none", color: "#333", fontSize: 16, cursor: "pointer", padding: "4px", lineHeight: 1, flexShrink: 0 }}>×</button>
+      {/* Увеличен хитбокс для удобного удаления на мобилках */}
+      <button onClick={() => onDelete(entry.id)} style={{ background: "none", border: "none", color: "#444", fontSize: 20, cursor: "pointer", padding: "8px 12px", marginRight: "-8px", lineHeight: 1, flexShrink: 0 }}>×</button>
     </div>
   );
 }
 
-function AnalyticsPanel({ topIncome, topExpense, totalIncome, totalExpense, balance, entries }) {
+function AnalyticsPanel({ topIncome, topExpense, totalIncome, totalExpense, balance }) {
   const maxIn = topIncome[0]?.total || 1;
   const maxEx = topExpense[0]?.total || 1;
   const savingsRate = totalIncome > 0 ? ((balance / totalIncome) * 100).toFixed(1) : 0;
@@ -323,7 +371,7 @@ function AnalyticsPanel({ topIncome, topExpense, totalIncome, totalExpense, bala
       {/* Stats row */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
         {[
-          { label: "Доход / Расход", value: totalIncome > 0 ? `${((totalIncome / (totalExpense || 1))).toFixed(2)}×` : "—", color: "#d4a843" },
+          { label: "Доход / Расход", value: totalIncome > 0 ? `${(totalIncome / (totalExpense || 1)).toFixed(2)}×` : "—", color: "#d4a843" },
           { label: "Норма сбережений", value: `${savingsRate}%`, color: parseFloat(savingsRate) >= 50 ? "#4caf6e" : "#e05555" },
         ].map(s => (
           <div key={s.label} style={{ background: "#12121e", border: "1px solid #2a2a40", borderRadius: 14, padding: "16px" }}>
